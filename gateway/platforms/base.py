@@ -1305,6 +1305,20 @@ class BasePlatformAdapter(ABC):
         self._fatal_error_message = None
         self._fatal_error_retryable = True
         self._write_runtime_status_safe("connected", platform_state="connected", error_code=None, error_message=None)
+        # Restart awareness: read persisted activity state if present.
+        try:
+            from agent.restart_awareness import read_activity, build_handoff
+            activity = read_activity()
+            if activity:
+                self._pending_restart_handoff = build_handoff(activity)
+                logger.info(
+                    "[%s] restart handoff \u2014 task=%s mode=%s",
+                    self.name,
+                    activity.get("current_task", "?"),
+                    activity.get("mode", "simple"),
+                )
+        except Exception:
+            pass
 
     def _mark_disconnected(self) -> None:
         self._running = False
