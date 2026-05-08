@@ -103,6 +103,34 @@ class TestShouldResetReason:
         source = _make_source()
         assert store._should_reset(entry, source) is None
 
+    def test_returns_max_duration_when_hard_ttl_expired(self, tmp_path):
+        store = _make_store(
+            SessionResetPolicy(mode="none", max_duration_minutes=60),
+            tmp_path,
+        )
+        entry = SessionEntry(
+            session_key="test",
+            session_id="s1",
+            created_at=datetime.now() - timedelta(hours=2),
+            updated_at=datetime.now() - timedelta(minutes=5),
+        )
+        source = _make_source()
+        assert store._should_reset(entry, source) == "max_duration"
+
+    def test_returns_none_when_hard_ttl_not_expired(self, tmp_path):
+        store = _make_store(
+            SessionResetPolicy(mode="none", max_duration_minutes=120),
+            tmp_path,
+        )
+        entry = SessionEntry(
+            session_key="test",
+            session_id="s1",
+            created_at=datetime.now() - timedelta(minutes=30),
+            updated_at=datetime.now() - timedelta(minutes=5),
+        )
+        source = _make_source()
+        assert store._should_reset(entry, source) is None
+
 
 # ---------------------------------------------------------------------------
 # SessionEntry captures reason
