@@ -779,6 +779,12 @@ class SessionStore:
             if entry.updated_at < today_reset:
                 return True
 
+        # Hard TTL: max session duration regardless of mode
+        if policy.max_duration_minutes is not None:
+            age_minutes = (now - entry.created_at).total_seconds() / 60
+            if age_minutes > policy.max_duration_minutes:
+                return True
+
         return False
 
     def _should_reset(self, entry: SessionEntry, source: SessionSource) -> Optional[str]:
@@ -800,10 +806,16 @@ class SessionStore:
             session_type=source.chat_type
         )
         
+        now = _now()
+        
+        # Hard TTL: max session duration regardless of mode
+        if policy.max_duration_minutes is not None:
+            age_minutes = (now - entry.created_at).total_seconds() / 60
+            if age_minutes > policy.max_duration_minutes:
+                return "max_duration"
+        
         if policy.mode == "none":
             return None
-        
-        now = _now()
         
         if policy.mode in ("idle", "both"):
             idle_deadline = entry.updated_at + timedelta(minutes=policy.idle_minutes)
