@@ -746,6 +746,34 @@ class MatrixAdapter(BasePlatformAdapter):
                     try:
                         await olm.verify_with_recovery_key(recovery_key)
                         logger.info("Matrix: cross-signing verified via recovery key")
+
+                        # Attempt to self-sign our own device with the recovered SSK.
+                        # This is required for Element to show the green shield
+                        # (device cross-signed by owner).
+                        try:
+                            if client.device_id:
+                                own_device = await olm.get_or_fetch_device(
+                                    client.mxid, client.device_id
+                                )
+                                if own_device:
+                                    await olm.sign_own_device(own_device)
+                                    logger.info(
+                                        "Matrix: successfully self-signed device %s with cross-signing key",
+                                        client.device_id,
+                                    )
+                                else:
+                                    logger.warning(
+                                        "Matrix: could not retrieve own device identity for self-signing"
+                                    )
+                            else:
+                                logger.warning(
+                                    "Matrix: no device_id set, cannot self-sign device"
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "Matrix: self-signing device with cross-signing key failed: %s",
+                                exc,
+                            )
                     except Exception as exc:
                         logger.warning(
                             "Matrix: recovery key verification failed: %s", exc
