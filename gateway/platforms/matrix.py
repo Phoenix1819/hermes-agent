@@ -384,12 +384,11 @@ class MatrixAdapter(BasePlatformAdapter):
             "MATRIX_REACTIONS", "true"
         ).lower() not in ("false", "0", "no")
         self._pending_reactions: dict[tuple[str, str], str] = {}
-        # Delay before redacting reactions so Matrix homeservers have time to
-        # deliver the final message event without tripping "missing event"
-        # errors in some clients.  5s is empirically safe; not user-tunable —
-        # if that changes, add a config.yaml entry rather than an env var.
-        self._reaction_redaction_delay_seconds = 5.0
-        self._reaction_redaction_tasks: Set[asyncio.Task] = set()
+
+        # Presence state tracking: map actual activity to Matrix presence.
+        # online = actively processing, unavailable = idle/connected, offline = disconnected.
+        self._presence_active_count: int = 0
+        self._presence_current_state: str = "offline"
 
         # Proxy support — resolve once at init, reuse for all HTTP traffic.
         self._proxy_url: str | None = resolve_proxy_url(platform_env_var="MATRIX_PROXY")
@@ -892,6 +891,7 @@ class MatrixAdapter(BasePlatformAdapter):
         # Start the sync loop.
         self._sync_task = asyncio.create_task(self._sync_loop())
         self._mark_connected()
+        await self.set_presence("online")
         return True
 
     async def disconnect(self) -> None:
@@ -905,14 +905,6 @@ class MatrixAdapter(BasePlatformAdapter):
             except (asyncio.CancelledError, Exception):
                 pass
 
-        redaction_tasks = list(self._reaction_redaction_tasks)
-        for task in redaction_tasks:
-            if not task.done():
-                task.cancel()
-        if redaction_tasks:
-            await asyncio.gather(*redaction_tasks, return_exceptions=True)
-        self._reaction_redaction_tasks.clear()
-
         # Close the SQLite crypto store database.
         if hasattr(self, "_crypto_db") and self._crypto_db:
             try:
@@ -921,6 +913,12 @@ class MatrixAdapter(BasePlatformAdapter):
                 logger.debug("Matrix: could not close crypto DB on disconnect: %s", exc)
 
         if self._client:
+            try:
+                self._presence_active_count = 0
+                self._presence_current_state = "offline"
+                await self.set_presence("offline")
+            except Exception:
+                pass
             try:
                 await self._client.api.session.close()
             except Exception:
@@ -2003,73 +2001,45 @@ class MatrixAdapter(BasePlatformAdapter):
         """Remove a reaction by redacting its event."""
         return await self.redact_message(room_id, reaction_event_id, reason)
 
-    def _schedule_reaction_redaction(
-        self,
-        room_id: str,
-        reaction_event_id: str,
-        reason: str = "",
-    ) -> None:
-        """Redact a reaction after a short delay so message delivery settles."""
-
-        async def _redact_later() -> None:
-            try:
-                if self._reaction_redaction_delay_seconds:
-                    await asyncio.sleep(self._reaction_redaction_delay_seconds)
-                if not await self._redact_reaction(room_id, reaction_event_id, reason):
-                    logger.debug(
-                        "Matrix: failed to redact reaction %s", reaction_event_id
-                    )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.debug(
-                    "Matrix: delayed reaction redaction failed for %s: %s",
-                    reaction_event_id,
-                    exc,
-                )
-
-        task = asyncio.create_task(_redact_later())
-        self._reaction_redaction_tasks.add(task)
-        task.add_done_callback(self._reaction_redaction_tasks.discard)
-
     async def on_processing_start(self, event: MessageEvent) -> None:
-        """Add eyes reaction when the agent starts processing a message."""
-        if not self._reactions_enabled:
-            return
-        msg_id = event.message_id
-        room_id = event.source.chat_id
-        if msg_id and room_id:
-            reaction_event_id = await self._send_reaction(room_id, msg_id, "\U0001f440")
-            if reaction_event_id:
-                self._pending_reactions[(room_id, msg_id)] = reaction_event_id
+        """Add eyes reaction and set presence to unavailable when actively working."""
+        if self._reactions_enabled:
+            msg_id = event.message_id
+            room_id = event.source.chat_id
+            if msg_id and room_id:
+                reaction_event_id = await self._send_reaction(room_id, msg_id, "\U0001f440")
+                if reaction_event_id:
+                    self._pending_reactions[(room_id, msg_id)] = reaction_event_id
+        # Track active processing count and transition presence.
+        self._presence_active_count += 1
+        if self._presence_active_count == 1 and self._presence_current_state != "unavailable":
+            await self.set_presence("unavailable", status_msg="working on Hermes")
 
     async def on_processing_complete(
         self,
         event: MessageEvent,
         outcome: ProcessingOutcome,
     ) -> None:
-        """Replace eyes with checkmark (success) or cross (failure)."""
-        if not self._reactions_enabled:
-            return
-        msg_id = event.message_id
-        room_id = event.source.chat_id
-        if not msg_id or not room_id:
-            return
-        if outcome == ProcessingOutcome.CANCELLED:
-            return
-        reaction_key = (room_id, msg_id)
-        if reaction_key in self._pending_reactions:
-            eyes_event_id = self._pending_reactions.pop(reaction_key)
-            self._schedule_reaction_redaction(
-                room_id,
-                eyes_event_id,
-                "processing complete",
-            )
-        await self._send_reaction(
-            room_id,
-            msg_id,
-            "\u2705" if outcome == ProcessingOutcome.SUCCESS else "\u274c",
-        )
+        """Replace eyes with checkmark (success) or cross (failure), and transition presence back to idle."""
+        if self._reactions_enabled:
+            msg_id = event.message_id
+            room_id = event.source.chat_id
+            if msg_id and room_id:
+                if outcome != ProcessingOutcome.CANCELLED:
+                    reaction_key = (room_id, msg_id)
+                    if reaction_key in self._pending_reactions:
+                        eyes_event_id = self._pending_reactions.pop(reaction_key)
+                        if not await self._redact_reaction(room_id, eyes_event_id):
+                            logger.debug("Matrix: failed to redact eyes reaction %s", eyes_event_id)
+                    await self._send_reaction(
+                        room_id,
+                        msg_id,
+                        "\u2705" if outcome == ProcessingOutcome.SUCCESS else "\u274c",
+                    )
+        # Track active processing count and transition presence.
+        self._presence_active_count = max(0, self._presence_active_count - 1)
+        if self._presence_active_count == 0 and self._presence_current_state != "online":
+            await self.set_presence("online")
 
     async def _on_reaction(self, event: Any) -> None:
         """Handle incoming reaction events."""
@@ -2143,8 +2113,11 @@ class MatrixAdapter(BasePlatformAdapter):
     ) -> None:
         """Redact the bot's seed ✅/❎ reactions, leaving only the user's reaction."""
         for emoji, evt_id in prompt.bot_reaction_events.items():
-            self._schedule_reaction_redaction(room_id, evt_id, "approval resolved")
-            logger.debug("Matrix: scheduled bot reaction redaction %s (%s)", emoji, evt_id)
+            try:
+                await self.redact_message(room_id, evt_id, "approval resolved")
+                logger.debug("Matrix: redacted bot reaction %s (%s)", emoji, evt_id)
+            except Exception as exc:
+                logger.debug("Matrix: failed to redact bot reaction %s: %s", emoji, exc)
 
     # ------------------------------------------------------------------
     # Text message aggregation (handles Matrix client-side splits)
