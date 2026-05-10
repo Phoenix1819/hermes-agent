@@ -78,6 +78,7 @@ AUTHOR_MAP = {
     "rw8143a@american.edu": "wali-reheman",
     "egitimviscara@gmail.com": "uzunkuyruk",
     "zhekinmaksim@gmail.com": "Zhekinmaksim",
+    "phoenix@sent.as": "Phoenix1819",
     "obafemiferanmi1999@gmail.com": "KvnGz",
     "159539633+MottledShadow@users.noreply.github.com": "MottledShadow",
     "aludwin+gh@gmail.com": "adamludwin",

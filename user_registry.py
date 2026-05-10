@@ -22,7 +22,7 @@ def _load_registry() -> Dict:
             if _REGISTRY is None:
                 path = os.path.expanduser("~/.hermes/users.yaml")
                 if os.path.exists(path):
-                    with open(path) as f:
+                    with open(path, encoding="utf-8") as f:
                         data = yaml.safe_load(f) or {}
                 else:
                     data = {}
