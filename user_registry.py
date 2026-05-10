@@ -6,29 +6,37 @@ directions (canonical name → platform IDs, platform ID → canonical name).
 """
 
 import os
-from typing import Dict, Optional
+import threading
+from typing import Dict, List, Optional
 import yaml
 
 _REGISTRY: Optional[Dict] = None
+_REGISTRY_LOCK = threading.Lock()
+_RAW_DATA: Optional[Dict] = None
 
 
 def _load_registry() -> Dict:
-    global _REGISTRY
+    global _REGISTRY, _RAW_DATA
     if _REGISTRY is None:
-        path = os.path.expanduser("~/.hermes/users.yaml")
-        if os.path.exists(path):
-            with open(path) as f:
-                data = yaml.safe_load(f) or {}
-        else:
-            data = {}
-        _REGISTRY = data.get("users", {})
+        with _REGISTRY_LOCK:
+            if _REGISTRY is None:
+                path = os.path.expanduser("~/.hermes/users.yaml")
+                if os.path.exists(path):
+                    with open(path) as f:
+                        data = yaml.safe_load(f) or {}
+                else:
+                    data = {}
+                _RAW_DATA = data
+                _REGISTRY = data.get("users", {})
     return _REGISTRY
 
 
 def reload_registry() -> None:
     """Force re-read from disk (e.g. after edits)."""
-    global _REGISTRY
-    _REGISTRY = None
+    global _REGISTRY, _RAW_DATA
+    with _REGISTRY_LOCK:
+        _REGISTRY = None
+        _RAW_DATA = None
     _load_registry()
 
 
@@ -43,9 +51,11 @@ def resolve_canonical_name(
     for canonical, info in registry.items():
         if not isinstance(info, dict):
             continue
-        # Direct match on any platform field
+        # Direct match on platform fields
         for plat_key, plat_val in info.items():
             if plat_key == "display_name":
+                continue
+            if platform and plat_key != platform:
                 continue
             if str(plat_val) == str(user_id):
                 return canonical
@@ -67,7 +77,7 @@ def resolve_user_id(
     return info.get(platform)
 
 
-def all_canonical_names() -> list:
+def all_canonical_names() -> List[str]:
     """Return all registered canonical names."""
     return list(_load_registry().keys())
 
@@ -83,15 +93,10 @@ def get_display_name(canonical_name: str) -> Optional[str]:
 
 def get_cli_default() -> Optional[str]:
     """Canonical name to use for CLI sessions."""
-    registry = _load_registry()
-    # The registry data loaded includes the top-level keys; we need the raw data
-    path = os.path.expanduser("~/.hermes/users.yaml")
-    if os.path.exists(path):
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
-    else:
-        data = {}
-    return data.get("cli_default")
+    _load_registry()
+    if _RAW_DATA is not None:
+        return _RAW_DATA.get("cli_default")
+    return None
 
 
 def resolve_for_store(user_id: Optional[str], platform: Optional[str] = None) -> str:
@@ -103,7 +108,7 @@ def resolve_for_store(user_id: Optional[str], platform: Optional[str] = None) ->
     return name or "default"
 
 
-def get_guardians(child_name: str) -> list:
+def get_guardians(child_name: str) -> List[str]:
     """Return list of canonical guardian names for a child, or []."""
     registry = _load_registry()
     info = registry.get(child_name)
@@ -112,7 +117,7 @@ def get_guardians(child_name: str) -> list:
     return []
 
 
-def get_dependents(guardian_name: str) -> list:
+def get_dependents(guardian_name: str) -> List[str]:
     """Return list of canonical child names this guardian is responsible for."""
     registry = _load_registry()
     dependents = []
@@ -122,7 +127,7 @@ def get_dependents(guardian_name: str) -> list:
     return dependents
 
 
-def get_visible_names(user_id: Optional[str] = None, platform: Optional[str] = None) -> list:
+def get_visible_names(user_id: Optional[str] = None, platform: Optional[str] = None) -> List[str]:
     """
     Return list of canonical names whose context this user may view.
     For guardians, includes their own name + all dependent children.
