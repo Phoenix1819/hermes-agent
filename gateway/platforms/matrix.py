@@ -384,11 +384,6 @@ class MatrixAdapter(BasePlatformAdapter):
             "MATRIX_REACTIONS", "true"
         ).lower() not in ("false", "0", "no")
         self._pending_reactions: dict[tuple[str, str], str] = {}
-        # Delay before redacting reactions so Matrix homeservers have time to
-        # deliver the final message event without tripping "missing event"
-        # errors in some clients.  5s is empirically safe; not user-tunable —
-        # if that changes, add a config.yaml entry rather than an env var.
-        self._reaction_redaction_delay_seconds = 5.0
         self._reaction_redaction_tasks: Set[asyncio.Task] = set()
 
         # Proxy support — resolve once at init, reuse for all HTTP traffic.
@@ -1981,12 +1976,10 @@ class MatrixAdapter(BasePlatformAdapter):
         reaction_event_id: str,
         reason: str = "",
     ) -> None:
-        """Redact a reaction after a short delay so message delivery settles."""
+        """Redact a reaction in the background so the processing loop isn't blocked."""
 
-        async def _redact_later() -> None:
+        async def _redact_bg() -> None:
             try:
-                if self._reaction_redaction_delay_seconds:
-                    await asyncio.sleep(self._reaction_redaction_delay_seconds)
                 if not await self._redact_reaction(room_id, reaction_event_id, reason):
                     logger.debug(
                         "Matrix: failed to redact reaction %s", reaction_event_id
@@ -1995,12 +1988,12 @@ class MatrixAdapter(BasePlatformAdapter):
                 raise
             except Exception as exc:
                 logger.debug(
-                    "Matrix: delayed reaction redaction failed for %s: %s",
+                    "Matrix: background reaction redaction failed for %s: %s",
                     reaction_event_id,
                     exc,
                 )
 
-        task = asyncio.create_task(_redact_later())
+        task = asyncio.create_task(_redact_bg())
         self._reaction_redaction_tasks.add(task)
         task.add_done_callback(self._reaction_redaction_tasks.discard)
 

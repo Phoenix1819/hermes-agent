@@ -1738,7 +1738,6 @@ class TestMatrixReactions:
         from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
 
         self.adapter._reactions_enabled = True
-        self.adapter._reaction_redaction_delay_seconds = 0.01
         self.adapter._pending_reactions = {("!room:ex", "$msg1"): "$eyes_reaction_123"}
         self.adapter._redact_reaction = AsyncMock(return_value=True)
         self.adapter._send_reaction = AsyncMock(return_value="$check_reaction_456")
@@ -1753,21 +1752,19 @@ class TestMatrixReactions:
             message_id="$msg1",
         )
         await self.adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
-        self.adapter._redact_reaction.assert_not_awaited()
-        self.adapter._send_reaction.assert_called_once_with("!room:ex", "$msg1", "\u2705")
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0)
         self.adapter._redact_reaction.assert_awaited_once_with(
             "!room:ex",
             "$eyes_reaction_123",
             "processing complete",
         )
+        self.adapter._send_reaction.assert_called_once_with("!room:ex", "$msg1", "\u2705")
 
     @pytest.mark.asyncio
     async def test_on_processing_complete_sends_cross_on_failure(self):
         from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
 
         self.adapter._reactions_enabled = True
-        self.adapter._reaction_redaction_delay_seconds = 0.01
         self.adapter._pending_reactions = {("!room:ex", "$msg1"): "$eyes_reaction_123"}
         self.adapter._redact_reaction = AsyncMock(return_value=True)
         self.adapter._send_reaction = AsyncMock(return_value="$cross_reaction_456")
@@ -1782,14 +1779,13 @@ class TestMatrixReactions:
             message_id="$msg1",
         )
         await self.adapter.on_processing_complete(event, ProcessingOutcome.FAILURE)
-        self.adapter._redact_reaction.assert_not_awaited()
-        self.adapter._send_reaction.assert_called_once_with("!room:ex", "$msg1", "\u274c")
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0)
         self.adapter._redact_reaction.assert_awaited_once_with(
             "!room:ex",
             "$eyes_reaction_123",
             "processing complete",
         )
+        self.adapter._send_reaction.assert_called_once_with("!room:ex", "$msg1", "\u274c")
 
     @pytest.mark.asyncio
     async def test_on_processing_complete_cancelled_sends_no_terminal_reaction(self):
@@ -1834,10 +1830,9 @@ class TestMatrixReactions:
         self.adapter._send_reaction.assert_called_once_with("!room:ex", "$msg1", "\u2705")
 
     @pytest.mark.asyncio
-    async def test_approval_reaction_cleanup_is_delayed(self):
-        """Bot approval reaction redactions should not run inline."""
+    async def test_approval_reaction_cleanup_is_background(self):
+        """Bot approval reaction redactions run in background tasks."""
 
-        self.adapter._reaction_redaction_delay_seconds = 0.01
         self.adapter._redact_reaction = AsyncMock(return_value=True)
         prompt = MagicMock()
         prompt.bot_reaction_events = {
@@ -1847,8 +1842,7 @@ class TestMatrixReactions:
 
         await self.adapter._redact_bot_approval_reactions("!room:ex", prompt)
 
-        self.adapter._redact_reaction.assert_not_awaited()
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0)
         self.adapter._redact_reaction.assert_any_await(
             "!room:ex",
             "$allow_reaction",
