@@ -915,6 +915,19 @@ class CredentialPool:
         if not available:
             self._current_id = None
             logger.info("credential pool: no available entries (all exhausted or empty)")
+            # Escalate once per process lifetime to avoid ticket spam.
+            # Pool exhaustion typically resolves when credits refresh.
+            if not getattr(self, "_exhaustion_escalated", False):
+                self._exhaustion_escalated = True
+                try:
+                    from agent.escalation import escalate_payment
+                    escalate_payment(
+                        "Credential pool exhausted: all entries empty or marked exhausted",
+                        details=f"Provider: {getattr(self, '_provider', 'unknown')}",
+                        attempted=["credential rotation", "pool refresh"],
+                    )
+                except Exception:
+                    pass
             return None
 
         if self._strategy == STRATEGY_RANDOM:

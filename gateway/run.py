@@ -2438,14 +2438,11 @@ class GatewayRunner:
         AIAgent.__init__ normalizes both formats into a chain.
         """
         try:
-            import yaml as _y
-            cfg_path = _hermes_home / "config.yaml"
-            if cfg_path.exists():
-                with open(cfg_path, encoding="utf-8") as _f:
-                    cfg = _y.safe_load(_f) or {}
-                fb = cfg.get("fallback_providers") or cfg.get("fallback_model") or None
-                if fb:
-                    return fb
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            fb = cfg.get("fallback_providers") or cfg.get("fallback_model") or None
+            if fb:
+                return fb
         except Exception:
             pass
         return None
@@ -15969,6 +15966,20 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         name="cron-ticker",
     )
     cron_thread.start()
+
+    # Start A2A escalation receiver (Phoenix only).
+    # Subscribes to hermes/escalate/+ and creates Kanban tickets directly.
+    # The dumb-pipe daemon is the fallback when Phoenix is offline.
+    _escalation_receiver_started = False
+    try:
+        _profile_name = _hermes_home.name
+        if _profile_name == "phoenix":
+            from agent.escalation_receiver import start_escalation_receiver
+            _escalation_receiver_started = start_escalation_receiver()
+            if _escalation_receiver_started:
+                logger.info("A2A escalation receiver started")
+    except Exception as e:
+        logger.debug("A2A escalation receiver startup failed: %s", e)
     
     # Wait for shutdown
     await runner.wait_for_shutdown()
@@ -15981,6 +15992,15 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Stop cron ticker cleanly
     cron_stop.set()
     cron_thread.join(timeout=5)
+
+    # Stop A2A escalation receiver
+    if _escalation_receiver_started:
+        try:
+            from agent.escalation_receiver import stop_escalation_receiver
+            stop_escalation_receiver()
+            logger.info("A2A escalation receiver stopped")
+        except Exception as e:
+            logger.debug("A2A escalation receiver stop failed: %s", e)
 
     # Close MCP server connections
     try:

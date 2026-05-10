@@ -100,6 +100,7 @@ class _OpenAIProxy:
 OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 
 from agent.credential_pool import load_pool
+from agent.escalation import escalate as _escalate
 from hermes_cli.config import get_hermes_home
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, normalize_proxy_env_vars
@@ -4200,6 +4201,13 @@ def call_llm(
                     base_url=str(getattr(fb_client, "base_url", "") or ""))
                 return _validate_llm_response(
                     fb_client.chat.completions.create(**fb_kwargs), task)
+        _escalate(
+            f"Auxiliary LLM fallback exhausted: {reason} on {resolved_provider}",
+            severity="high",
+            category="model",
+            details=str(first_err)[:800],
+            attempted=["primary provider", "auth refresh", "fallback provider chain"],
+        )
         raise
 
 
@@ -4517,4 +4525,11 @@ async def async_call_llm(
                     fb_kwargs["model"] = async_fb_model
                 return _validate_llm_response(
                     await async_fb.chat.completions.create(**fb_kwargs), task)
+        _escalate(
+            f"Async auxiliary LLM fallback exhausted: {reason} on {resolved_provider}",
+            severity="high",
+            category="model",
+            details=str(first_err)[:800],
+            attempted=["primary provider", "auth refresh", "fallback provider chain"],
+        )
         raise
