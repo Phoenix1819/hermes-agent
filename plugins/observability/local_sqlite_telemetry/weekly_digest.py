@@ -179,8 +179,9 @@ def main():
     recs = []
 
     c.execute("SELECT COUNT(*) FROM llm_calls WHERE timestamp >= ? AND cost_usd IS NULL", (since,))
-    if c.fetchone()[0] > 0:
-        recs.append("  COST TRACKING: 80 LLM calls missing cost_usd — wire in model pricing.")
+    missing_cost = c.fetchone()[0]
+    if missing_cost > 0:
+        recs.append(f"  COST TRACKING: {missing_cost} LLM calls missing cost_usd — wire in model pricing.")
 
     c.execute("""
         SELECT model, COUNT(*) FROM llm_calls
@@ -197,8 +198,10 @@ def main():
 
     c.execute("SELECT COUNT(*) FROM tool_calls WHERE tool_name='terminal' AND status='success' AND timestamp >= ?", (since,))
     ok_term = c.fetchone()[0] or 0
-    if ok_term == 0:
-        recs.append("  TERMINAL TOOL: 0% success rate (335 fails) — CRITICAL: verify gate hook registered.")
+    c.execute("SELECT COUNT(*) FROM tool_calls WHERE tool_name='terminal' AND status!='success' AND timestamp >= ?", (since,))
+    fail_term = c.fetchone()[0] or 0
+    if ok_term == 0 and fail_term > 0:
+        recs.append(f"  TERMINAL TOOL: 0% success rate ({fail_term} fails) — CRITICAL: verify gate hook registered.")
 
     if not recs:
         recs.append("  telemetry clean — no urgent actions")
