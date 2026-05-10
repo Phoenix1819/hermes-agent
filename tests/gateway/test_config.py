@@ -144,11 +144,19 @@ class TestSessionResetPolicy:
         assert restored.at_hour == 6
         assert restored.idle_minutes == 120
 
+    def test_max_duration_minutes_roundtrip(self):
+        policy = SessionResetPolicy(mode="none", max_duration_minutes=360)
+        d = policy.to_dict()
+        restored = SessionResetPolicy.from_dict(d)
+        assert restored.mode == "none"
+        assert restored.max_duration_minutes == 360
+
     def test_defaults(self):
         policy = SessionResetPolicy()
         assert policy.mode == "both"
         assert policy.at_hour == 4
         assert policy.idle_minutes == 1440
+        assert policy.max_duration_minutes is None
 
     def test_from_dict_treats_null_values_as_defaults(self):
         restored = SessionResetPolicy.from_dict(
@@ -157,6 +165,13 @@ class TestSessionResetPolicy:
         assert restored.mode == "both"
         assert restored.at_hour == 4
         assert restored.idle_minutes == 1440
+        assert restored.max_duration_minutes is None
+
+    def test_from_dict_max_duration_minutes_null(self):
+        restored = SessionResetPolicy.from_dict(
+            {"max_duration_minutes": None}
+        )
+        assert restored.max_duration_minutes is None
 
     def test_from_dict_coerces_quoted_false_notify(self):
         restored = SessionResetPolicy.from_dict({"notify": "false"})
