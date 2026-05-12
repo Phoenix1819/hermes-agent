@@ -15980,7 +15980,6 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 logger.info("A2A escalation receiver started")
     except Exception as e:
         logger.debug("A2A escalation receiver startup failed: %s", e)
-    
     # Wait for shutdown
     await runner.wait_for_shutdown()
 
@@ -15988,7 +15987,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         if runner.exit_reason:
             logger.error("Gateway exiting with failure: %s", runner.exit_reason)
         return False
-    
+
     # Stop cron ticker cleanly
     cron_stop.set()
     cron_thread.join(timeout=5)
@@ -16010,7 +16009,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         pass
 
     if runner.exit_code is not None:
-        raise SystemExit(runner.exit_code)
+        sys.exit(runner.exit_code)
 
     # When an unexpected SIGTERM caused the shutdown and it wasn't a planned
     # restart (/restart, /update, SIGUSR1), exit non-zero so systemd's
