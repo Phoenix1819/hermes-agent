@@ -43,7 +43,7 @@ def report(days: int = 7):
         """, (since,)).fetchone()
         sessions, llm, tools, prompt, completion, cost = row
         cost = cost or 0.0
-        conn.execute("""
+        cursor = conn.execute("""
             SELECT tool_name, COUNT(*),
                    SUM(CASE WHEN status='failure' THEN 1 ELSE 0 END),
                    ROUND(AVG(duration_ms),0)
@@ -53,14 +53,14 @@ def report(days: int = 7):
             ORDER BY COUNT(*) DESC
             LIMIT 10
         """, (since,))
-        top_tools = conn.fetchall()
-        conn.execute("""
+        top_tools = cursor.fetchall()
+        cursor = conn.execute("""
             SELECT ROUND(AVG(utilization_pct),1), MAX(utilization_pct),
                    SUM(compression_triggered)
             FROM context_pressure
             WHERE timestamp >= ?
         """, (since,))
-        avg_ctx, max_ctx, compress = conn.fetchone()
+        avg_ctx, max_ctx, compress = cursor.fetchone()
     lines = [
         f"Telemetry Report (last {days} days)",
         f"Sessions: {sessions}",
