@@ -1,17 +1,11 @@
 """A2A escalation receiver for Phoenix.
 
-Subscribes to hermes/escalate/+ on the local MQTT broker and creates
-Kanban tickets + user notifications directly. This is the PRIMARY path.
-The dumb-pipe daemon (escalation_pipe.py) is the fallback when Phoenix
-is offline — it writes JSON files to disk that Phoenix processes on startup.
+Subscribes to hermes/escalate/+ on the local MQTT broker and routes
+escalations into the unified notification bus.
 
 Usage (inside Phoenix gateway process):
     from agent.escalation_receiver import start_escalation_receiver
     start_escalation_receiver()
-
-Or for one-shot file processing on startup:
-    from agent.escalation_receiver import process_backlog
-    process_backlog()
 """
 
 from __future__ import annotations
@@ -23,7 +17,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 try:
     import paho.mqtt.client as mqtt
@@ -39,8 +33,6 @@ KEEPALIVE = 15
 TOPIC_PATTERN = "hermes/escalate/+"
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-INCOMING_DIR = HERMES_HOME / "escalations" / "incoming"
-PROCESSED_DIR = HERMES_HOME / "escalations" / "processed"
 
 _receiver_thread: Optional[threading.Thread] = None
 _client: Optional[Any] = None
@@ -52,7 +44,11 @@ _on_escalation: Optional[Callable[[Dict[str, Any]], None]] = None
 
 
 def _default_handle_escalation(payload: Dict[str, Any]) -> None:
-    """Default handler — logs and creates a Kanban ticket via the todo tool."""
+    """Default handler — inserts escalation into the notification bus.
+
+    Phoenix's notification consumer picks it up, creates a Kanban ticket,
+    and messages the user if triage says so.
+    """
     logger.info(
         "ESCALATION from %s [%s/%s]: %s",
         payload.get("agent", "?"),
@@ -60,47 +56,28 @@ def _default_handle_escalation(payload: Dict[str, Any]) -> None:
         payload.get("category", "?"),
         payload.get("summary", "?"),
     )
-    # Phoenix will override this with its own handler that creates Kanban tickets
-    # and messages the user. This default just logs so nothing is lost.
-
-
-def _move_to_processed(path: Path) -> None:
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    dest = PROCESSED_DIR / path.name
     try:
-        path.rename(dest)
+        import notification_bus as bus
+        priority = _severity_to_priority(payload.get("severity", "medium"))
+        bus.insert_message(
+            source="a2a",
+            topic=f"escalation/{payload.get('agent', 'unknown')}",
+            payload=payload,
+            priority=priority,
+        )
     except Exception:
-        # If rename fails (cross-device), copy and delete
-        import shutil
-        shutil.copy2(path, dest)
-        path.unlink()
+        logger.exception("Failed to insert escalation into notification bus")
 
 
-def process_backlog() -> List[Dict[str, Any]]:
-    """Process all JSON files in ~/.hermes/escalations/incoming/.
-
-    Returns the list of payloads processed. Each file is moved to
-    ~/.hermes/escalations/processed/ after handling.
-    """
-    INCOMING_DIR.mkdir(parents=True, exist_ok=True)
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-
-    payloads: List[Dict[str, Any]] = []
-    for path in sorted(INCOMING_DIR.glob("*.json")):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            payloads.append(payload)
-            handler = _on_escalation or _default_handle_escalation
-            try:
-                handler(payload)
-            except Exception as exc:
-                logger.exception("Backlog handler failed for %s: %s", path.name, exc)
-            _move_to_processed(path)
-        except Exception as exc:
-            logger.exception("Failed to process backlog file %s: %s", path.name, exc)
-    if payloads:
-        logger.info("Processed %s backlog escalation(s)", len(payloads))
-    return payloads
+def _severity_to_priority(severity: str) -> int:
+    """Map escalation severity to bus priority (lower = more urgent)."""
+    mapping = {
+        "critical": 1,
+        "high": 2,
+        "medium": 3,
+        "low": 5,
+    }
+    return mapping.get(severity.lower(), 3)
 
 
 def _on_connect(client, userdata, flags, rc, properties=None):

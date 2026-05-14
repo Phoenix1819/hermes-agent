@@ -15980,6 +15980,26 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 logger.info("A2A escalation receiver started")
     except Exception as e:
         logger.debug("A2A escalation receiver startup failed: %s", e)
+    # Start notification bus consumer (Phoenix only).
+    # Polls the unified bus, triages messages via Holographic memory,
+    # and delivers to Signal / drops / digests / holds.
+    consumer_stop = threading.Event()
+    consumer_thread = None
+    try:
+        _profile_name = _hermes_home.name
+        if _profile_name == "phoenix":
+            from notification_consumer import start_consumer
+            consumer_thread = start_consumer(
+                consumer_stop,
+                adapters=runner.adapters,
+                loop=asyncio.get_running_loop(),
+                interval=30,
+                config=runner.config,
+            )
+            logger.info("Notification consumer started")
+    except Exception as e:
+        logger.debug("Notification consumer startup failed: %s", e)
+
     # Wait for shutdown
     await runner.wait_for_shutdown()
 
@@ -15991,6 +16011,12 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Stop cron ticker cleanly
     cron_stop.set()
     cron_thread.join(timeout=5)
+
+    # Stop notification consumer cleanly
+    if consumer_thread is not None:
+        consumer_stop.set()
+        consumer_thread.join(timeout=5)
+        logger.info("Notification consumer stopped")
 
     # Stop A2A escalation receiver
     if _escalation_receiver_started:

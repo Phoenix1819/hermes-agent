@@ -30,29 +30,9 @@ PORT = 1883
 KEEPALIVE = 15
 TOPIC_ESCALATE = "hermes/escalate/{agent}"
 
-# Filesystem fallback directory for when MQTT is unreachable.
-_FALLBACK_DIR = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "escalations" / "incoming"
-
 # Only warn once per process if paho-mqtt is missing or broker is down.
 _paho_warned = False
 _broker_warned = False
-
-
-def _write_incoming(payload: Dict[str, Any]) -> None:
-    """Write escalation JSON to filesystem fallback so nothing is lost."""
-    try:
-        _FALLBACK_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-        ticket_id = payload.get("id", "unknown")
-        agent = payload.get("agent", "unknown")
-        fname = f"{ts}_{agent}_{ticket_id}.json"
-        tmp_path = _FALLBACK_DIR / f".{fname}.tmp"
-        final_path = _FALLBACK_DIR / fname
-        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        tmp_path.rename(final_path)
-        logger.info("Escalation saved to fallback filesystem: %s", final_path.name)
-    except Exception:
-        pass  # Last resort — silently drop if even filesystem fails
 
 
 def _detect_agent() -> str:
@@ -178,9 +158,9 @@ def escalate(
         try:
             ok = _publish_sync(_agent, payload, qos=qos)
             if not ok:
-                _write_incoming(payload)
+                logger.warning("Escalation publish failed for ticket %s — dropped (no fallback configured)", ticket_id)
         except Exception:
-            _write_incoming(payload)
+            logger.warning("Escalation publish crashed for ticket %s — dropped", ticket_id)
 
     threading.Thread(target=_fire, daemon=True, name=f"escalate-{ticket_id}").start()
     return ticket_id
