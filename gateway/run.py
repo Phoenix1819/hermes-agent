@@ -7546,6 +7546,32 @@ class GatewayRunner:
             }
             await self.hooks.emit("agent:start", hook_ctx)
 
+            # -----------------------------------------------------------------
+            # Surface pending Message Bus escalations to Phoenix context.
+            # Any DELIVER or HOLD events that arrived via MQTT while Phoenix
+            # was idle get injected as a system note before this turn.
+            # -----------------------------------------------------------------
+            try:
+                from agent.message_subscriber import get_pending_escalations
+                pending = get_pending_escalations(clear=True)
+                if pending:
+                    lines = ["[System note: The following events need attention from other agents:]"]
+                    for evt in pending[:5]:  # cap at 5 to avoid context bloat
+                        cat = evt.get("_category", "?")
+                        etype = evt.get("event_type", "?")
+                        src = evt.get("_source", "?")
+                        prio = evt.get("priority", "?")
+                        hash_prefix = evt.get("recurrence_hash", "?")[:8]
+                        inner = evt.get("payload", {})
+                        detail = inner.get("error", "") or inner.get("content", "") or inner.get("summary", "")
+                        detail = str(detail)[:120]
+                        lines.append(f"  • {cat}/{etype} from {src} (prio={prio}, hash={hash_prefix}): {detail}")
+                    if len(pending) > 5:
+                        lines.append(f"  ... and {len(pending) - 5} more event(s)")
+                    context_prompt += "\n\n" + "\n".join(lines)
+            except Exception as exc:
+                logger.debug("Failed to surface pending escalations: %s", exc)
+
             # Run the agent
             agent_result = await self._run_agent(
                 message=message_text,
@@ -16593,38 +16619,20 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     )
     cron_thread.start()
 
-    # Start A2A escalation receiver (Phoenix only).
-    # Subscribes to hermes/escalate/+ and creates Kanban tickets directly.
-    # The dumb-pipe daemon is the fallback when Phoenix is offline.
-    _escalation_receiver_started = False
+    # Start Hermes Internal Message Bus subscriber (Phoenix only).
+    # Subscribes to hermes/+/+/phoenix and hermes/+/+/broadcast.
+    # Uses built-in triage handler: DROP, DELIVER, HOLD decisions.
+    _message_subscriber_started = False
+    _subscriber_stop = threading.Event()
     try:
         _profile_name = _hermes_home.name
         if _profile_name == "phoenix":
-            from agent.escalation_receiver import start_escalation_receiver
-            _escalation_receiver_started = start_escalation_receiver()
-            if _escalation_receiver_started:
-                logger.info("A2A escalation receiver started")
+            from agent.message_subscriber import start_message_subscriber
+            _message_subscriber_started = start_message_subscriber()
+            if _message_subscriber_started:
+                logger.info("Message subscriber started")
     except Exception as e:
-        logger.debug("A2A escalation receiver startup failed: %s", e)
-    # Start notification bus consumer (Phoenix only).
-    # Polls the unified bus, triages messages via Holographic memory,
-    # and delivers to Signal / drops / digests / holds.
-    consumer_stop = threading.Event()
-    consumer_thread = None
-    try:
-        _profile_name = _hermes_home.name
-        if _profile_name == "phoenix":
-            from notification_consumer import start_consumer
-            consumer_thread = start_consumer(
-                consumer_stop,
-                adapters=runner.adapters,
-                loop=asyncio.get_running_loop(),
-                interval=30,
-                config=runner.config,
-            )
-            logger.info("Notification consumer started")
-    except Exception as e:
-        logger.debug("Notification consumer startup failed: %s", e)
+        logger.debug("Message subscriber startup failed: %s", e)
 
     # Wait for shutdown
     await runner.wait_for_shutdown()
@@ -16638,20 +16646,14 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     cron_stop.set()
     cron_thread.join(timeout=5)
 
-    # Stop notification consumer cleanly
-    if consumer_thread is not None:
-        consumer_stop.set()
-        consumer_thread.join(timeout=5)
-        logger.info("Notification consumer stopped")
-
-    # Stop A2A escalation receiver
-    if _escalation_receiver_started:
+    # Stop message subscriber cleanly
+    if _message_subscriber_started:
         try:
-            from agent.escalation_receiver import stop_escalation_receiver
-            stop_escalation_receiver()
-            logger.info("A2A escalation receiver stopped")
+            from agent.message_subscriber import stop_message_subscriber
+            stop_message_subscriber()
+            logger.info("Message subscriber stopped")
         except Exception as e:
-            logger.debug("A2A escalation receiver stop failed: %s", e)
+            logger.debug("Message subscriber stop failed: %s", e)
 
     # Close MCP server connections
     try:

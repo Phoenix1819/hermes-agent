@@ -481,15 +481,13 @@ def _send_media_via_adapter(
 
 def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
     """
-    Insert cron job output into the unified notification bus.
+    Insert cron job output into the Hermes Internal Message Bus.
 
-    Resolves delivery targets, builds a bus message payload, and inserts it.
-    The notification consumer handles actual delivery (wrapping, MEDIA extraction,
-    platform routing).
-
-    Returns None on success, or an error string if insertion failed.
+    All cron outputs are published as system events. The orchestrator
+    (Phoenix) receives them reactively via MQTT and they are durably
+    stored in SQLite regardless of subscription state.
     """
-    import notification_bus as bus
+    from hermes_event_bus import publish_event
 
     targets = _resolve_delivery_targets(job)
     if not targets:
@@ -497,16 +495,15 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
             msg = f"no delivery target resolved for deliver={job.get('deliver', 'local')}"
             logger.warning("Job '%s': %s", job["id"], msg)
             return msg
-        # local-only job: still insert into bus (consumer may drop or digest)
         targets = []
 
-    # Failure alerts start with the warning emoji → treat as higher priority
+    # Failure alerts start with the warning emoji -> higher priority
     priority = 2 if content and content.lstrip().startswith("⚠") else 5
 
     try:
-        bus.insert_message(
-            source="cron",
-            topic=f"cron/{job.get('id', 'unknown')}",
+        publish_event(
+            category="system",
+            event_type="cron_output",
             priority=priority,
             payload={
                 "content": content,
@@ -514,11 +511,12 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 "job_name": job.get("name", ""),
                 "targets": targets,
             },
+            target_agent="phoenix" if targets else "broadcast",
         )
-        logger.debug("Job '%s': inserted into notification bus (pri=%d)", job.get("id"), priority)
+        logger.debug("Job '%s': published to event bus (pri=%d)", job.get("id"), priority)
     except Exception as exc:
-        logger.error("Job '%s': failed to insert into notification bus: %s", job.get("id"), exc)
-        return f"notification bus insert failed: {exc}"
+        logger.error("Job '%s': failed to publish to event bus: %s", job.get("id"), exc)
+        return f"event bus publish failed: {exc}"
 
     return None
 
