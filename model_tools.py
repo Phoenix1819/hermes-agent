@@ -21,6 +21,7 @@ Public API (signatures preserved from the original 2,400-line version):
 """
 
 import json
+import os
 import asyncio
 import logging
 import threading
@@ -818,6 +819,45 @@ def handle_function_call(
                     break
         except Exception as _hook_err:
             logger.debug("transform_tool_result hook error: %s", _hook_err)
+
+        # -------------------------------------------------------------
+        # Auto-escalate handled tool errors to the Hermes Internal Message Bus.
+        # Detects {"error": "..."} results that registry.dispatch() and
+        # tool_error() emit for caught exceptions. Runs after all hooks
+        # so we observe the final canonical result. Fail-open.
+        # -------------------------------------------------------------
+        try:
+            parsed = json.loads(result)
+            if isinstance(parsed, dict) and "error" in parsed:
+                profile = os.environ.get("HERMES_PROFILE", "unknown")
+                if profile != "phoenix":
+                    from hermes_event_bus import publish_event
+                    err_text = str(parsed.get("error", ""))
+                    priority = 3
+                    if any(k in err_text.lower() for k in ("auth", "permission", "forbidden")):
+                        priority = 1
+                    elif any(k in err_text for k in ("AttributeError", "TypeError", "KeyError", "IndexError", "ValueError", "NameError", "RuntimeError")):
+                        priority = 2
+                    publish_event(
+                        category="guardrail",
+                        event_type="tool_failure",
+                        source_agent=profile,
+                        target_agent="phoenix",
+                        priority=priority,
+                        payload={
+                            "error": err_text,
+                            "tool": function_name,
+                            "args": function_args,
+                            "agent": profile,
+                            "session_id": session_id or "",
+                            "tool_call_id": tool_call_id or "",
+                            "duration_ms": duration_ms,
+                        },
+                        task_id=task_id or "",
+                        session_id=session_id or "",
+                    )
+        except Exception:
+            pass
 
         return result
 

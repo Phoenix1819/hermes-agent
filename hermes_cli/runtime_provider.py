@@ -448,6 +448,8 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             # Fall back to inline api_key when key_env is absent or unresolvable
             if not resolved_api_key:
                 resolved_api_key = str(entry.get("api_key", "") or "").strip()
+                if resolved_api_key:
+                    resolved_api_key = os.path.expandvars(resolved_api_key)
 
             if requested_norm in {ep_name, name_norm, f"custom:{name_norm}"}:
                 # Found match by provider key
@@ -520,7 +522,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         result = {
             "name": name.strip(),
             "base_url": base_url.strip(),
-            "api_key": str(entry.get("api_key", "") or "").strip(),
+            "api_key": os.path.expandvars(str(entry.get("api_key", "") or "").strip()),
         }
         key_env = str(entry.get("key_env", "") or "").strip()
         if key_env:

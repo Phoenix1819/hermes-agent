@@ -32,6 +32,14 @@ from typing import Optional, Sequence
 
 from hermes_constants import get_config_path, get_hermes_home
 
+# mautrix expects a TraceLogger with .trace() / .silly() methods, but its
+# import may run *after* Hermes has already created standard Logger instances.
+# Monkey-patch the base class so existing loggers also get these methods.
+if not hasattr(logging.Logger, "trace"):
+    logging.Logger.trace = lambda self, msg, *args, **kwargs: self.log(5, msg, *args, **kwargs)
+if not hasattr(logging.Logger, "silly"):
+    logging.Logger.silly = lambda self, msg, *args, **kwargs: self.log(1, msg, *args, **kwargs)
+
 # Sentinel to track whether setup_logging() has already run.  The function
 # is idempotent — calling it twice is safe but the second call is a no-op
 # unless ``force=True``.
@@ -63,6 +71,29 @@ _NOISY_LOGGERS = (
     "charset_normalizer",
     "markdown_it",
 )
+
+# Third-party loggers that spam even at WARNING — suppress to ERROR.
+_NOISY_AT_WARNING = (
+    "mau.crypto",
+)
+
+
+class _DropNoisyWarningFilter(logging.Filter):
+    """Drops WARNING-level records from known-noisy loggers.
+
+    More robust than setLevel() because third-party libraries may
+    re-set their logger level after we do.  A filter on the handler
+    is the final gate before a record is emitted.
+    """
+
+    def __init__(self, logger_names: Sequence[str]) -> None:
+        super().__init__()
+        self._names = set(logger_names)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno <= logging.WARNING and record.name in self._names:
+            return False
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +261,7 @@ def setup_logging(
         max_bytes=2 * 1024 * 1024,
         backup_count=2,
         formatter=RedactingFormatter(_LOG_FORMAT),
+        log_filter=_DropNoisyWarningFilter(_NOISY_AT_WARNING),
     )
 
     # --- gateway.log (INFO+, gateway component only) ------------------------
@@ -254,6 +286,10 @@ def setup_logging(
     # Suppress noisy third-party loggers.
     for name in _NOISY_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
+
+    # Suppress loggers that are noisy even at WARNING level.
+    for name in _NOISY_AT_WARNING:
+        logging.getLogger(name).setLevel(logging.ERROR)
 
     _logging_initialized = True
     return log_dir
@@ -287,6 +323,10 @@ def setup_verbose_logging() -> None:
     # Keep third-party libraries at WARNING to reduce noise.
     for name in _NOISY_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
+
+    # Keep warning-noisy libraries at ERROR even in verbose mode.
+    for name in _NOISY_AT_WARNING:
+        logging.getLogger(name).setLevel(logging.ERROR)
     # rex-deploy at INFO for sandbox status.
     logging.getLogger("rex-deploy").setLevel(logging.INFO)
 

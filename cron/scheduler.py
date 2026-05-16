@@ -464,14 +464,7 @@ def _send_media_via_adapter(
             else:
                 coro = adapter.send_document(chat_id=chat_id, file_path=media_path, metadata=metadata)
 
-            from agent.async_utils import safe_schedule_threadsafe
-            future = safe_schedule_threadsafe(coro, loop)
-            if future is None:
-                logger.warning(
-                    "Job '%s': cannot send media %s, gateway loop unavailable",
-                    job.get("id", "?"), media_path,
-                )
-                return
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
             try:
                 result = future.result(timeout=30)
             except TimeoutError:
@@ -488,184 +481,44 @@ def _send_media_via_adapter(
 
 def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
     """
-    Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
+    Insert cron job output into the Hermes Internal Message Bus.
 
-    When ``adapters`` and ``loop`` are provided (gateway is running), tries to
-    use the live adapter first — this supports E2EE rooms (e.g. Matrix) where
-    the standalone HTTP path cannot encrypt.  Falls back to standalone send if
-    the adapter path fails or is unavailable.
-
-    Returns None on success, or an error string on failure.
+    All cron outputs are published as system events. The orchestrator
+    (Phoenix) receives them reactively via MQTT and they are durably
+    stored in SQLite regardless of subscription state.
     """
+    from hermes_event_bus import publish_event
+
     targets = _resolve_delivery_targets(job)
     if not targets:
         if job.get("deliver", "local") != "local":
             msg = f"no delivery target resolved for deliver={job.get('deliver', 'local')}"
             logger.warning("Job '%s': %s", job["id"], msg)
             return msg
-        return None  # local-only jobs don't deliver — not a failure
+        targets = []
 
-    from tools.send_message_tool import _send_to_platform
-    from gateway.config import load_gateway_config, Platform
+    # Failure alerts start with the warning emoji -> higher priority
+    priority = 2 if content and content.lstrip().startswith("⚠") else 5
 
-    # Optionally wrap the content with a header/footer so the user knows this
-    # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
-    # in config.yaml for clean output.
-    wrap_response = True
     try:
-        user_cfg = load_config()
-        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
-    except Exception:
-        pass
-
-    if wrap_response:
-        task_name = job.get("name", job["id"])
-        job_id = job.get("id", "")
-        delivery_content = (
-            f"Cronjob Response: {task_name}\n"
-            f"(job_id: {job_id})\n"
-            f"-------------\n\n"
-            f"{content}\n\n"
-            f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
+        publish_event(
+            category="system",
+            event_type="cron_output",
+            priority=priority,
+            payload={
+                "content": content,
+                "job_id": job.get("id", ""),
+                "job_name": job.get("name", ""),
+                "targets": targets,
+            },
+            target_agent="phoenix" if targets else "broadcast",
         )
-    else:
-        delivery_content = content
+        logger.debug("Job '%s': published to event bus (pri=%d)", job.get("id"), priority)
+    except Exception as exc:
+        logger.error("Job '%s': failed to publish to event bus: %s", job.get("id"), exc)
+        return f"event bus publish failed: {exc}"
 
-    # Extract MEDIA: tags so attachments are forwarded as files, not raw text
-    from gateway.platforms.base import BasePlatformAdapter
-    media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
-
-    try:
-        config = load_gateway_config()
-    except Exception as e:
-        msg = f"failed to load gateway config: {e}"
-        logger.error("Job '%s': %s", job["id"], msg)
-        return msg
-
-    delivery_errors = []
-
-    for target in targets:
-        platform_name = target["platform"]
-        chat_id = target["chat_id"]
-        thread_id = target.get("thread_id")
-
-        # Diagnostic: log thread_id for topic-aware delivery debugging
-        origin = _resolve_origin(job) or {}
-        origin_thread = origin.get("thread_id")
-        if origin_thread and not thread_id:
-            logger.warning(
-                "Job '%s': origin has thread_id=%s but delivery target lost it "
-                "(deliver=%s, target=%s)",
-                job["id"], origin_thread, job.get("deliver", "local"), target,
-            )
-        elif thread_id:
-            logger.debug(
-                "Job '%s': delivering to %s:%s thread_id=%s",
-                job["id"], platform_name, chat_id, thread_id,
-            )
-
-        # Built-in names resolve to their enum member; plugin platform names
-        # create dynamic members via Platform._missing_().
-        try:
-            platform = Platform(platform_name.lower())
-        except (ValueError, KeyError):
-            msg = f"unknown platform '{platform_name}'"
-            logger.warning("Job '%s': %s", job["id"], msg)
-            delivery_errors.append(msg)
-            continue
-
-        pconfig = config.platforms.get(platform)
-        if not pconfig or not pconfig.enabled:
-            msg = f"platform '{platform_name}' not configured/enabled"
-            logger.warning("Job '%s': %s", job["id"], msg)
-            delivery_errors.append(msg)
-            continue
-
-        # Prefer the live adapter when the gateway is running — this supports E2EE
-        # rooms (e.g. Matrix) where the standalone HTTP path cannot encrypt.
-        runtime_adapter = (adapters or {}).get(platform)
-        delivered = False
-        if runtime_adapter is not None and loop is not None and getattr(loop, "is_running", lambda: False)():
-            send_metadata = {"thread_id": thread_id} if thread_id else None
-            try:
-                # Send cleaned text (MEDIA tags stripped) — not the raw content
-                text_to_send = cleaned_delivery_content.strip()
-                adapter_ok = True
-                if text_to_send:
-                    from agent.async_utils import safe_schedule_threadsafe
-                    future = safe_schedule_threadsafe(
-                        runtime_adapter.send(chat_id, text_to_send, metadata=send_metadata),
-                        loop,
-                    )
-                    if future is None:
-                        adapter_ok = False
-                    else:
-                        try:
-                            send_result = future.result(timeout=60)
-                        except TimeoutError:
-                            future.cancel()
-                            raise
-                        if send_result and not getattr(send_result, "success", True):
-                            err = getattr(send_result, "error", "unknown")
-                            logger.warning(
-                                "Job '%s': live adapter send to %s:%s failed (%s), falling back to standalone",
-                                job["id"], platform_name, chat_id, err,
-                            )
-                            adapter_ok = False  # fall through to standalone path
-
-                # Send extracted media files as native attachments via the live adapter
-                if adapter_ok and media_files:
-                    _send_media_via_adapter(
-                        runtime_adapter,
-                        chat_id,
-                        media_files,
-                        send_metadata,
-                        loop,
-                        job,
-                        platform=platform,
-                    )
-
-                if adapter_ok:
-                    logger.info("Job '%s': delivered to %s:%s via live adapter", job["id"], platform_name, chat_id)
-                    delivered = True
-            except Exception as e:
-                logger.warning(
-                    "Job '%s': live adapter delivery to %s:%s failed (%s), falling back to standalone",
-                    job["id"], platform_name, chat_id, e,
-                )
-
-        if not delivered:
-            # Standalone path: run the async send in a fresh event loop (safe from any thread)
-            coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)
-            try:
-                result = asyncio.run(coro)
-            except RuntimeError:
-                # asyncio.run() checks for a running loop before awaiting the coroutine;
-                # when it raises, the original coro was never started — close it to
-                # prevent "coroutine was never awaited" RuntimeWarning, then retry in a
-                # fresh thread that has no running loop.
-                coro.close()
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files))
-                    result = future.result(timeout=30)
-            except Exception as e:
-                msg = f"delivery to {platform_name}:{chat_id} failed: {e}"
-                logger.error("Job '%s': %s", job["id"], msg)
-                delivery_errors.append(msg)
-                continue
-
-            if result and result.get("error"):
-                msg = f"delivery error: {result['error']}"
-                logger.error("Job '%s': %s", job["id"], msg)
-                delivery_errors.append(msg)
-                continue
-
-            logger.info("Job '%s': delivered to %s:%s", job["id"], platform_name, chat_id)
-
-    if delivery_errors:
-        return "; ".join(delivery_errors)
     return None
-
 
 _DEFAULT_SCRIPT_TIMEOUT = 120  # seconds
 # Backward-compatible module override used by tests and emergency monkeypatches.

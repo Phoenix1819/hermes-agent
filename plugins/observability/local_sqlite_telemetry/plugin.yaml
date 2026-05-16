@@ -1,0 +1,12 @@
+name: local_sqlite_telemetry
+version: "1.0.0"
+description: "Local SQLite telemetry storage for Hermes — traces LLM calls, tool usage, context pressure, and session summaries to ~/.hermes/profiles/<profile>/telemetry.db. Zero external dependencies, zero credentials."
+author: Phoenix
+hooks:
+  - on_session_start
+  - on_session_end
+  - pre_tool_call
+  - post_tool_call
+  - pre_llm_call
+  - post_llm_call
+  - on_turn_start

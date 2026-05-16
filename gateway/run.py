@@ -2471,14 +2471,11 @@ class GatewayRunner:
         AIAgent.__init__ normalizes both formats into a chain.
         """
         try:
-            import yaml as _y
-            cfg_path = _hermes_home / "config.yaml"
-            if cfg_path.exists():
-                with open(cfg_path, encoding="utf-8") as _f:
-                    cfg = _y.safe_load(_f) or {}
-                fb = cfg.get("fallback_providers") or cfg.get("fallback_model") or None
-                if fb:
-                    return fb
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            fb = cfg.get("fallback_providers") or cfg.get("fallback_model") or None
+            if fb:
+                return fb
         except Exception:
             pass
         return None
@@ -7605,6 +7602,32 @@ class GatewayRunner:
                 "message": message_text[:500],
             }
             await self.hooks.emit("agent:start", hook_ctx)
+
+            # -----------------------------------------------------------------
+            # Surface pending Message Bus escalations to Phoenix context.
+            # Any DELIVER or HOLD events that arrived via MQTT while Phoenix
+            # was idle get injected as a system note before this turn.
+            # -----------------------------------------------------------------
+            try:
+                from agent.message_subscriber import get_pending_escalations
+                pending = get_pending_escalations(clear=True)
+                if pending:
+                    lines = ["[System note: The following events need attention from other agents:]"]
+                    for evt in pending[:5]:  # cap at 5 to avoid context bloat
+                        cat = evt.get("_category", "?")
+                        etype = evt.get("event_type", "?")
+                        src = evt.get("_source", "?")
+                        prio = evt.get("priority", "?")
+                        hash_prefix = evt.get("recurrence_hash", "?")[:8]
+                        inner = evt.get("payload", {})
+                        detail = inner.get("error", "") or inner.get("content", "") or inner.get("summary", "")
+                        detail = str(detail)[:120]
+                        lines.append(f"  • {cat}/{etype} from {src} (prio={prio}, hash={hash_prefix}): {detail}")
+                    if len(pending) > 5:
+                        lines.append(f"  ... and {len(pending) - 5} more event(s)")
+                    context_prompt += "\n\n" + "\n".join(lines)
+            except Exception as exc:
+                logger.debug("Failed to surface pending escalations: %s", exc)
 
             # Run the agent
             agent_result = await self._run_agent(
@@ -16807,7 +16830,22 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         name="cron-ticker",
     )
     cron_thread.start()
-    
+
+    # Start Hermes Internal Message Bus subscriber (Phoenix only).
+    # Subscribes to hermes/+/+/phoenix and hermes/+/+/broadcast.
+    # Uses built-in triage handler: DROP, DELIVER, HOLD decisions.
+    _message_subscriber_started = False
+    _subscriber_stop = threading.Event()
+    try:
+        _profile_name = _hermes_home.name
+        if _profile_name == "phoenix":
+            from agent.message_subscriber import start_message_subscriber
+            _message_subscriber_started = start_message_subscriber()
+            if _message_subscriber_started:
+                logger.info("Message subscriber started")
+    except Exception as e:
+        logger.debug("Message subscriber startup failed: %s", e)
+
     # Wait for shutdown
     await runner.wait_for_shutdown()
 
@@ -16815,10 +16853,19 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         if runner.exit_reason:
             logger.error("Gateway exiting with failure: %s", runner.exit_reason)
         return False
-    
+
     # Stop cron ticker cleanly
     cron_stop.set()
     cron_thread.join(timeout=5)
+
+    # Stop message subscriber cleanly
+    if _message_subscriber_started:
+        try:
+            from agent.message_subscriber import stop_message_subscriber
+            stop_message_subscriber()
+            logger.info("Message subscriber stopped")
+        except Exception as e:
+            logger.debug("Message subscriber stop failed: %s", e)
 
     # Close MCP server connections
     try:
@@ -16828,7 +16875,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         pass
 
     if runner.exit_code is not None:
-        raise SystemExit(runner.exit_code)
+        sys.exit(runner.exit_code)
 
     # When an unexpected SIGTERM caused the shutdown and it wasn't a planned
     # restart (/restart, /update, SIGUSR1), exit non-zero so systemd's
